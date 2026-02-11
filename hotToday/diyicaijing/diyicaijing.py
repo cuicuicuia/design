@@ -1,0 +1,21 @@
+import requests
+from urllib.parse import urljoin
+def get_diyicaijing_data():
+    url = "https://www.yicai.com/api/ajax/getranklistbykeys?keys=newsRank%2CvideoRank%2CimageRank%2CliveRank"
+
+    res = requests.get(url, timeout=30)
+
+    res_json = res.json()
+
+    hot_data = []
+    newsRank = res_json.get('newsRank', [])
+    for news in newsRank.get('week', []):
+        title = news['NewsTitle']
+        link = urljoin(url, news['url'])
+        hotScore = 0
+        hot_data.append({
+            'title': title,
+            'url': link,
+            'hotScore': hotScore
+        })
+    return {"data": hot_data}
