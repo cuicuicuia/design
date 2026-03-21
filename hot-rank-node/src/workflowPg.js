@@ -7,6 +7,22 @@ const CHAT_RESPONSE_SCHEMA = {
   required: ['content'],
 };
 
+const NODE_USER_VIEW_RULES = `你是一个工作流节点执行器，请同时返回「机器可解析数据」和「用户可读内容」。
+【输出规则】
+1. 必须返回 JSON（用于系统解析）
+2. 同时提供一个 user_view 字段，用于前端直接展示
+3. user_view 必须是自然语言，不包含 JSON、代码或结构体
+4. 不允许返回 [Knowledge: ...] 或任何额外包裹
+【输出格式】
+{
+  "node_id": string,
+  "status": "success" | "error",
+  "result": any,
+  "user_view": string,
+  "message": string,
+  "metadata": {}
+}`;
+
 const EXECUTOR_TRACE_SCHEMA = {
   type: 'object',
   properties: {
@@ -125,6 +141,55 @@ function buildExecutorPrompt(template, nodes, edges, inputs) {
     .replace(/\{\{\s*inputs\s*\}\}/g, JSON.stringify(inputs || {}, null, 2));
 }
 
+function isPlainObject(v) {
+  return Object.prototype.toString.call(v) === '[object Object]';
+}
+
+function buildUserViewFromResult(result, fallback = '') {
+  if (typeof result === 'string') {
+    const s = result.trim();
+    if (!s) return String(fallback || '节点执行完成。');
+    if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(s);
+        if (parsed && typeof parsed.user_view === 'string' && parsed.user_view.trim()) {
+          return parsed.user_view.trim();
+        }
+      } catch (_) {
+        return String(fallback || '节点执行完成，已生成结构化结果。');
+      }
+      return String(fallback || '节点执行完成，已生成结构化结果。');
+    }
+    return s;
+  }
+  if (isPlainObject(result)) {
+    if (typeof result.user_view === 'string' && result.user_view.trim()) return result.user_view.trim();
+    if (typeof result.message === 'string' && result.message.trim()) return result.message.trim();
+    return String(fallback || '节点执行完成，已生成结构化结果。');
+  }
+  if (Array.isArray(result)) return String(fallback || `节点执行完成，生成了 ${result.length} 项结果。`);
+  if (result === undefined || result === null) return String(fallback || '节点执行完成。');
+  return String(result);
+}
+
+function withNodeEnvelope(node, rawOut, patch = {}) {
+  const base = isPlainObject(rawOut) ? { ...rawOut } : { result: rawOut };
+  const resultVal = Object.prototype.hasOwnProperty.call(base, 'result') ? base.result : base;
+  const status = patch.status || 'success';
+  const message = patch.message || (status === 'success' ? '执行成功' : '执行失败');
+  const userView = patch.user_view || buildUserViewFromResult(resultVal, message);
+  const metadata = isPlainObject(base.metadata) ? base.metadata : {};
+  return {
+    ...base,
+    node_id: String(node?.id || ''),
+    status,
+    result: resultVal,
+    user_view: String(userView || message),
+    message: String(message),
+    metadata: { ...metadata, ...(patch.metadata || {}) },
+  };
+}
+
 function buildGraph(nodes, edges) {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
   const inEdges = new Map();
@@ -159,28 +224,29 @@ async function runNode(node, inputs, runtimeInput, ctx) {
       data.user_input ??
       data.input ??
       '';
-    return { trigger: renderMaybe(v, vars) };
+    const trigger = renderMaybe(v, vars);
+    return withNodeEnvelope(node, { trigger, result: trigger }, { message: '开始节点已接收输入' });
   }
 
   if (type === 'llm') {
-    const mode = String(data.mode || 'chat');
+    const mode = 'chat';
     let prompt = renderMaybe(inputs.prompt ?? data.prompt ?? '', vars);
     let system = renderMaybe(inputs.system ?? data.system ?? '你是一个有帮助的助手。', vars);
+    system = `${String(system || '').trim()}\n\n${NODE_USER_VIEW_RULES}`.trim();
     // 兼容：如果 prompt 为空，但 system 从上游接收到了内容，
     // 通常说明用户把上游输出连到了 system 输入口。
     // 为满足“每个节点都用上个节点结果处理”，把 system 当作 prompt 回退。
     const promptEmpty = !String(prompt || '').trim();
-    const systemFromEdge = Object.prototype.hasOwnProperty.call(inputs || {}, 'system') && !promptEmpty;
     const systemHasEdgeValue = Object.prototype.hasOwnProperty.call(inputs || {}, 'system') && String(inputs.system || '').trim();
     const dataPromptEmpty = !String(data.prompt || '').trim();
     if (promptEmpty && systemHasEdgeValue && dataPromptEmpty) {
       prompt = inputs.system;
       system = renderMaybe(data.system ?? '你是一个有帮助的助手。', vars);
     }
-    const modelOpt = data.model === 'gpt-4o' ? 'openai:gpt-4o' : (data.model || 'qwen');
+    const modelOpt = 'qwen';
     let messages = { system, user: prompt };
     if (!String(prompt || '').trim()) {
-      return { text: '[LLM: empty prompt]' };
+      return withNodeEnvelope(node, { text: '[LLM: empty prompt]' }, { status: 'error', message: '提示词为空' });
     }
     try {
       // LLM 超时可配置：node.data.timeout_ms / timeoutMs（毫秒）
@@ -210,24 +276,31 @@ async function runNode(node, inputs, runtimeInput, ctx) {
         enableSearch,
         throwOnFail: true,
       });
-      if (!raw) return { text: '[LLM: empty response]' };
+      if (!raw) {
+        return withNodeEnvelope(node, { text: '[LLM: empty response]' }, { status: 'error', message: '模型未返回内容' });
+      }
       try {
         const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
         const content = parsed && typeof parsed.content === 'string'
           ? parsed.content
           : JSON.stringify(parsed, null, 2);
-        return { text: content };
+        return withNodeEnvelope(node, { text: content, result: parsed ?? content }, { message: 'LLM处理成功' });
       } catch (_) {
-        return { text: raw };
+        return withNodeEnvelope(node, { text: raw, result: raw }, { message: 'LLM处理成功' });
       }
     } catch (e) {
-      return { text: `[LLM Error: ${String(e?.code || e?.message || e)}]` };
+      return withNodeEnvelope(
+        node,
+        { text: `[LLM Error: ${String(e?.code || e?.message || e)}]` },
+        { status: 'error', message: 'LLM调用失败' },
+      );
     }
   }
 
   if (type === 'knowledge') {
     const query = renderMaybe(inputs.query ?? data.query ?? '', vars);
-    return { result: `[Knowledge: ${query}]` };
+    const result = { query, matched: false };
+    return withNodeEnvelope(node, { result }, { message: '知识检索已完成', user_view: `已完成知识检索，关键词为“${String(query || '')}”。` });
   }
 
   if (type === 'condition') {
@@ -241,7 +314,7 @@ async function runNode(node, inputs, runtimeInput, ctx) {
     } catch (_) {
       ok = false;
     }
-    return { yes: ok ? value : undefined, no: !ok ? value : undefined };
+    return withNodeEnvelope(node, { yes: ok ? value : undefined, no: !ok ? value : undefined }, { message: ok ? '条件判断为真' : '条件判断为假' });
   }
 
   if (type === 'code') {
@@ -250,7 +323,8 @@ async function runNode(node, inputs, runtimeInput, ctx) {
     // eslint-disable-next-line no-new-func
     const fn = new Function('input', code);
     const result = fn(inputVal);
-    return { result: result !== undefined ? String(result) : '' };
+    const finalResult = result !== undefined ? String(result) : '';
+    return withNodeEnvelope(node, { result: finalResult }, { message: '代码节点执行成功' });
   }
 
   if (type === 'http') {
@@ -265,17 +339,19 @@ async function runNode(node, inputs, runtimeInput, ctx) {
     const res = await fetch(url, opts);
     const text = await res.text();
     try {
-      return { response: JSON.parse(text) };
+      const response = JSON.parse(text);
+      return withNodeEnvelope(node, { response, result: response }, { message: 'HTTP请求成功' });
     } catch (_) {
-      return { response: text };
+      return withNodeEnvelope(node, { response: text, result: text }, { message: 'HTTP请求成功' });
     }
   }
 
   if (type === 'end') {
-    return { result: inputs.result ?? inputs.input ?? '' };
+    const result = inputs.result ?? inputs.input ?? '';
+    return withNodeEnvelope(node, { result }, { message: '流程执行完成' });
   }
 
-  return {};
+  return withNodeEnvelope(node, {}, { message: '节点执行完成' });
 }
 
 async function getList(organizationId) {

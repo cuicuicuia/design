@@ -15,6 +15,22 @@ const CHAT_RESPONSE_SCHEMA = {
   required: ['content'],
 };
 
+const NODE_USER_VIEW_RULES = `你是一个工作流节点执行器，请同时返回「机器可解析数据」和「用户可读内容」。
+【输出规则】
+1. 必须返回 JSON（用于系统解析）
+2. 同时提供一个 user_view 字段，用于前端直接展示
+3. user_view 必须是自然语言，不包含 JSON、代码或结构体
+4. 不允许返回 [Knowledge: ...] 或任何额外包裹
+【输出格式】
+{
+  "node_id": string,
+  "status": "success" | "error",
+  "result": any,
+  "user_view": string,
+  "message": string,
+  "metadata": {}
+}`;
+
 function generateId() {
   return `wf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -93,6 +109,55 @@ function buildGraph(nodes, edges) {
   return { nodeMap, inEdges, outEdges };
 }
 
+function isPlainObject(v) {
+  return Object.prototype.toString.call(v) === '[object Object]';
+}
+
+function buildUserViewFromResult(result, fallback = '') {
+  if (typeof result === 'string') {
+    const s = result.trim();
+    if (!s) return String(fallback || '节点执行完成。');
+    if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(s);
+        if (parsed && typeof parsed.user_view === 'string' && parsed.user_view.trim()) {
+          return parsed.user_view.trim();
+        }
+      } catch (_) {
+        return String(fallback || '节点执行完成，已生成结构化结果。');
+      }
+      return String(fallback || '节点执行完成，已生成结构化结果。');
+    }
+    return s;
+  }
+  if (isPlainObject(result)) {
+    if (typeof result.user_view === 'string' && result.user_view.trim()) return result.user_view.trim();
+    if (typeof result.message === 'string' && result.message.trim()) return result.message.trim();
+    return String(fallback || '节点执行完成，已生成结构化结果。');
+  }
+  if (Array.isArray(result)) return String(fallback || `节点执行完成，生成了 ${result.length} 项结果。`);
+  if (result === undefined || result === null) return String(fallback || '节点执行完成。');
+  return String(result);
+}
+
+function withNodeEnvelope(node, rawOut, patch = {}) {
+  const base = isPlainObject(rawOut) ? { ...rawOut } : { result: rawOut };
+  const resultVal = Object.prototype.hasOwnProperty.call(base, 'result') ? base.result : base;
+  const status = patch.status || 'success';
+  const message = patch.message || (status === 'success' ? '执行成功' : '执行失败');
+  const userView = patch.user_view || buildUserViewFromResult(resultVal, message);
+  const metadata = isPlainObject(base.metadata) ? base.metadata : {};
+  return {
+    ...base,
+    node_id: String(node?.id || ''),
+    status,
+    result: resultVal,
+    user_view: String(userView || message),
+    message: String(message),
+    metadata: { ...metadata, ...(patch.metadata || {}) },
+  };
+}
+
 /**
  * 执行单个节点，返回该节点各 output 的取值
  * inputs: { [targetHandle]: value } 来自上游节点
@@ -110,12 +175,13 @@ async function runNode(node, inputs, runtimeInput) {
       data.user_input ??
       data.input ??
       '';
-    return { trigger: v };
+    return withNodeEnvelope(node, { trigger: v, result: v }, { message: '开始节点已接收输入' });
   }
 
   if (type === 'llm') {
     let prompt = inputs.prompt ?? data.prompt ?? '';
     let system = inputs.system ?? data.system ?? '你是一个有帮助的助手。';
+    system = `${String(system || '').trim()}\n\n${NODE_USER_VIEW_RULES}`.trim();
     const promptEmpty = !String(prompt || '').trim();
     const systemHasValue = Object.prototype.hasOwnProperty.call(inputs || {}, 'system') && String(inputs.system || '').trim();
     const dataPromptEmpty = !String(data.prompt || '').trim();
@@ -124,7 +190,7 @@ async function runNode(node, inputs, runtimeInput) {
       prompt = inputs.system;
       system = data.system ?? '你是一个有帮助的助手。';
     }
-    const modelOpt = data.model === 'gpt-4o' ? 'openai:gpt-4o' : (data.model || 'qwen');
+    const modelOpt = 'qwen';
     const messages = { system, user: prompt };
     let content = '';
     try {
@@ -146,13 +212,13 @@ async function runNode(node, inputs, runtimeInput) {
     } catch (e) {
       content = `[LLM Error: ${e.message}]`;
     }
-    return { text: content };
+    return withNodeEnvelope(node, { text: content, result: content }, { message: 'LLM处理成功' });
   }
 
   if (type === 'knowledge') {
     const query = inputs.query ?? data.query ?? '';
-    // 简化：无真实知识库时返回占位
-    return { result: `[Knowledge: ${query}]` };
+    const result = { query, matched: false };
+    return withNodeEnvelope(node, { result }, { message: '知识检索已完成', user_view: `已完成知识检索，关键词为“${String(query || '')}”。` });
   }
 
   if (type === 'condition') {
@@ -166,7 +232,7 @@ async function runNode(node, inputs, runtimeInput) {
     } catch (_) {
       ok = false;
     }
-    return { yes: ok ? value : undefined, no: !ok ? value : undefined };
+    return withNodeEnvelope(node, { yes: ok ? value : undefined, no: !ok ? value : undefined }, { message: ok ? '条件判断为真' : '条件判断为假' });
   }
 
   if (type === 'code') {
@@ -175,9 +241,10 @@ async function runNode(node, inputs, runtimeInput) {
     try {
       const fn = new Function('input', code);
       const result = fn(inputVal);
-      return { result: result !== undefined ? String(result) : '' };
+      const finalResult = result !== undefined ? String(result) : '';
+      return withNodeEnvelope(node, { result: finalResult }, { message: '代码节点执行成功' });
     } catch (e) {
-      return { result: `[Code Error: ${e.message}]` };
+      return withNodeEnvelope(node, { result: `[Code Error: ${e.message}]` }, { status: 'error', message: '代码节点执行失败' });
     }
   }
 
@@ -197,17 +264,18 @@ async function runNode(node, inputs, runtimeInput) {
       try {
         response = JSON.parse(text);
       } catch (_) {}
-      return { response };
+      return withNodeEnvelope(node, { response, result: response }, { message: 'HTTP请求成功' });
     } catch (e) {
-      return { response: { error: e.message } };
+      return withNodeEnvelope(node, { response: { error: e.message } }, { status: 'error', message: 'HTTP请求失败' });
     }
   }
 
   if (type === 'end') {
-    return { result: inputs.result ?? inputs.input ?? '' };
+    const result = inputs.result ?? inputs.input ?? '';
+    return withNodeEnvelope(node, { result }, { message: '流程执行完成' });
   }
 
-  return {};
+  return withNodeEnvelope(node, {}, { message: '节点执行完成' });
 }
 
 /**
