@@ -1,7 +1,11 @@
-<script setup>
+<script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { getHotRank, getYellowCalendar, getTodayTopNews, refresh } from '@/api/hotRank'
+import type { UserInfo } from '@/api/user'
 import MusicPlayer from '@/components/MusicPlayer.vue'
+import ChatModal from '@/components/ChatModal.vue'
+import AuthModal from '@/components/AuthModal.vue'
 import {
   AdjustmentsHorizontalIcon,
   XMarkIcon,
@@ -11,6 +15,7 @@ import {
   ChevronRightIcon,
   BellIcon,
   ChatBubbleOvalLeftEllipsisIcon,
+  ChatBubbleLeftRightIcon,
   LanguageIcon,
   MusicalNoteIcon,
   RocketLaunchIcon,
@@ -18,14 +23,18 @@ import {
   EyeIcon,
   EyeSlashIcon,
   MoonIcon,
-  SunIcon
+  SunIcon,
+  Squares2X2Icon,
+  ChartBarIcon
 } from '@heroicons/vue/16/solid'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import { useHead } from '@vueuse/head';
 
 
 const { t, tm, locale } = useI18n()
+const router = useRouter()
 const md = new MarkdownIt();
 useHead({
   script: [
@@ -47,6 +56,13 @@ const showNewsModal = ref(false)
 const newsLoading = ref(false)
 const newsError = ref(null)
 const todayNews = ref([])
+
+const showChatModal = ref(false)
+const chatContext = ref({ title: '', url: '' })
+
+// 登录 / 注册
+const showAuthModal = ref(false)
+const currentUser = ref<UserInfo | null>(null)
 
 
 const showColPopover = ref(false)
@@ -89,6 +105,7 @@ const STORAGE_KEY = 'hotrank-section-order'
 const STORAGE_KEY_LAYOUT = 'hotrank-layout-type'
 const STORAGE_KEY_THEME = 'hotrank-theme'
 const STORAGE_KEY_WRAP = 'hotrank-wrap'
+const STORAGE_KEY_USER = 'hotrank-current-user'
 
 // 日历相关函数
 const weekDays = computed(() => {
@@ -241,6 +258,18 @@ const closeNewsModal = () => {
   showNewsModal.value = false
 }
 
+const openChatModal = (item) => {
+  chatContext.value = {
+    title: item?.hot_label ?? '',
+    url: item?.hot_url ?? '',
+  }
+  showChatModal.value = true
+}
+
+const closeChatModal = () => {
+  showChatModal.value = false
+}
+
 const expandedNews = ref([])
 
 const toggleNewsContent = (idx) => {
@@ -282,6 +311,43 @@ const goToToday = () => {
 // 跳转到GitHub
 const goToGitHub = () => {
   window.open('https://github.com/datehoer/hot-rank-web', '_blank')
+}
+
+// 跳转到 AI 工作流
+const goToWorkflow = () => {
+  router.push('/workflow')
+}
+
+const goToAiMonitor = () => {
+  router.push('/ai-monitor')
+}
+
+const openAuthModal = () => {
+  showAuthModal.value = true
+}
+
+const closeAuthModal = () => {
+  showAuthModal.value = false
+}
+
+const handleAuthed = (payload: { user: UserInfo; token: string }) => {
+  currentUser.value = payload.user
+  try {
+    window.localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(payload.user))
+  } catch (e) {
+    console.warn('保存用户信息失败', e)
+  }
+  showAuthModal.value = false
+}
+
+const logout = () => {
+  currentUser.value = null
+  try {
+    window.localStorage.removeItem(STORAGE_KEY_USER)
+    window.localStorage.removeItem('hotrank_auth_token')
+  } catch (e) {
+    console.warn('清理登录状态失败', e)
+  }
 }
 
 // 刷新按钮点击
@@ -491,7 +557,19 @@ onMounted(() => {
   } else {
     isWrap.value = false
   }
+  // 恢复主题
   applyTheme()
+
+  // 恢复用户信息
+  try {
+    const rawUser = window.localStorage.getItem(STORAGE_KEY_USER)
+    if (rawUser) {
+      currentUser.value = JSON.parse(rawUser)
+    }
+  } catch (e) {
+    console.warn('读取本地用户信息失败', e)
+  }
+
   fetchHotRank()
 })
 
@@ -536,6 +614,9 @@ const containerMaxW = computed(() =>
   layout.value > 3 ? 'max-w-8xl' : 'max-w-6xl'
 )
 
+const route = useRoute()
+const isSpecialPage = computed(() => route.path === '/workflow' || route.path === '/ai-monitor')
+
 // 删除指定下标的板块
 const removeSection = (idx) => {
   if (idx < 0 || idx >= manualSectionOrder.value.length) return
@@ -546,10 +627,11 @@ const removeSection = (idx) => {
 </script>
 
 <template>
-  <main class="p-10 font-mono text-black bg-white dark:bg-gray-900 dark:text-white mx-auto" :class="containerMaxW">
+  <router-view v-if="isSpecialPage" />
+  <main v-else class="p-10 font-mono text-black bg-white dark:bg-gray-900 dark:text-white mx-auto" :class="containerMaxW">
     <h1 class="text-2xl font-bold mb-8">{{ t('app.title') }}</h1>
 
-    <div class="mb-6 space-x-2 flex justify-end">
+    <div class="mb-6 space-x-2 flex justify-end items-center">
       <div class="relative inline-block">
         <!-- 触发按钮 -->
          <Bars3BottomLeftIcon
@@ -610,6 +692,16 @@ const removeSection = (idx) => {
         class="px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 h-8 w-8 cursor-pointer"
         @click="goToGitHub"
       />
+      <squares2-x2-icon
+        class="px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 h-8 w-8 cursor-pointer"
+        title="AI 工作流"
+        @click="goToWorkflow"
+      />
+      <chart-bar-icon
+        class="px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 h-8 w-8 cursor-pointer"
+        title="AI 调用监控"
+        @click="goToAiMonitor"
+      />
       <language-icon
         class="px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 h-8 w-8 cursor-pointer"
         @click="toggleLang"
@@ -626,6 +718,29 @@ const removeSection = (idx) => {
         <MoonIcon v-if="!isDark" class="h-full w-full" />
         <SunIcon  v-else      class="h-full w-full" />
       </button>
+
+      <!-- 登录 / 用户信息 -->
+      <div class="ml-2 flex items-center space-x-2 text-xs">
+        <template v-if="currentUser">
+          <span class="max-w-[140px] truncate">
+            {{ currentUser.username || currentUser.email }}
+          </span>
+          <button
+            class="px-2 py-1 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+            @click="logout"
+          >
+            {{ t('app.logout') || '退出' }}
+          </button>
+        </template>
+        <template v-else>
+          <button
+            class="px-2 py-1 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+            @click="openAuthModal"
+          >
+            {{ t('app.loginTitle') }}
+          </button>
+        </template>
+      </div>
     </div>
     
     <!-- 排序设置弹窗 -->
@@ -936,6 +1051,20 @@ const removeSection = (idx) => {
       </div>
     </div>
 
+    <!-- 千问 AI 聊天弹窗 -->
+    <ChatModal
+      :visible="showChatModal"
+      :context="chatContext"
+      @close="closeChatModal"
+    />
+
+    <!-- 登录 / 注册弹窗 -->
+    <AuthModal
+      :visible="showAuthModal"
+      @close="closeAuthModal"
+      @authed="handleAuthed"
+    />
+
     <!-- 加载状态 -->
     <div v-if="loading" class="text-center py-8">
       <div class="text-lg">{{ t('app.loading') }}</div>
@@ -970,28 +1099,33 @@ const removeSection = (idx) => {
           <li
             v-for="(item, i) in section.data"
             :key="i"
-            class="flex justify-between items-center gap-4"
+            class="flex justify-between items-center gap-2"
             :title="item.hot_label"
           >
             <div
               :class="[
-                'max-w-[95%]',
+                'max-w-[85%] min-w-0',
                 isWrap ? 'whitespace-normal' : 'truncate'
               ]"
             >
-              <span class="font-mono text-sm inline-block w-10 text-left">#{{ i + 1 }}</span>
+              <span class="font-mono text-sm inline-block w-10 text-left shrink-0">#{{ i + 1 }}</span>
               <a
                 :href="item.hot_url"
                 class="border-b border-dashed border-black dark:border-gray-400 hover:underline"
                 target="_blank"
-                rel="noopener noreferrer" 
+                rel="noopener noreferrer"
               >
                 {{ item.hot_label }}
               </a>
             </div>
-            <!-- <code class="ml-2 px-1 py-0.5 text-sm">
-              {{ item.hot_value }}
-            </code> -->
+            <button
+              type="button"
+              class="shrink-0 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400"
+              :title="t('app.chatWithAI')"
+              @click="openChatModal(item)"
+            >
+              <ChatBubbleLeftRightIcon class="h-4 w-4" />
+            </button>
           </li>
         </ul>
       </div>

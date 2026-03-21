@@ -4,7 +4,6 @@ import type {
   AxiosResponse,
   InternalAxiosRequestConfig,
 } from 'axios'
-import { assert } from 'console'
 const baseURL = import.meta.env.VITE_API_BASE_URL
 // 创建axios实例
 const request: AxiosInstance = axios.create({
@@ -15,11 +14,18 @@ const request: AxiosInstance = axios.create({
   },
 })
 
+const TOKEN_KEY = 'hotrank_auth_token'
+
 // 请求拦截器
 request.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    // 可以在这里添加token等认证信息
-    // console.log('Request:', config.url)
+    const token = typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_KEY) : null
+    if (token) {
+      // 统一带上 Bearer token
+      const headers = (config.headers ?? {}) as unknown as Record<string, string>
+      headers.Authorization = `Bearer ${token}`
+      config.headers = headers as unknown as InternalAxiosRequestConfig['headers']
+    }
     return config
   },
   (error) => {
@@ -41,24 +47,26 @@ request.interceptors.response.use(
 )
 
 // 封装GET请求
-export const get = <T = any>(url: string, params?: any): Promise<T> => {
+export const get = <T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> => {
   return request.get(url, { params })
 }
 
 // 封装POST请求
-export const post = <T = any>(url: string, data?: any): Promise<T> => {
+export const post = <T = unknown>(url: string, data?: unknown): Promise<T> => {
   return request.post(url, data)
 }
 
 // 封装PUT请求
-export const put = <T = any>(url: string, data?: any): Promise<T> => {
+export const put = <T = unknown>(url: string, data?: unknown): Promise<T> => {
   return request.put(url, data)
 }
 
 // 封装DELETE请求
-export const del = <T = any>(url: string): Promise<T> => {
+export const del = <T = unknown>(url: string): Promise<T> => {
   return request.delete(url)
 }
 
+
+export const AUTH_TOKEN_KEY = TOKEN_KEY
 
 export default request

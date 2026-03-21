@@ -16,6 +16,9 @@
   },
   "dependencies": {
     "@heroicons/vue": "^2.2.0",
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
     "@vueuse/head": "^2.0.0",
     "axios": "^1.10.0",
     "markdown-it": "^14.1.0",
