@@ -112,6 +112,8 @@ const suppressDirty = ref(false)
 const showGrid = ref(true)
 const gridGap = ref(28)
 const snapToGrid = ref(false)
+const consoleCollapsed = ref(false)
+const assistantOpen = ref(false)
 
 const executionProgress = computed(() => {
   const ex = executionDetail.value
@@ -119,6 +121,20 @@ const executionProgress = computed(() => {
   const finishedNodes = ex.nodes.length
   const last = finishedNodes > 0 ? ex.nodes[finishedNodes - 1] : null
   return { finishedNodes, last }
+})
+
+const assistantSuggestion = computed(() => {
+  const ex = executionDetail.value
+  const lastErrNode = ex?.nodes?.find((n) => n.status === 'fail' && n.error_message)
+  const rawErr = String(lastErrNode?.error_message || runResult.value?.error || '')
+  const msg = rawErr.toLowerCase()
+  if (!rawErr) return '状态正常：可继续观察每个节点 input/output 的递进变化。'
+  if (msg.includes('empty prompt')) return '建议：将上游输出连接到 LLM 的 prompt 端口，或在节点里填写默认 prompt。'
+  if (msg.includes('timeout') || msg.includes('aborterror')) return '建议：提高 timeout_ms 到 90000，并先关闭 enable_search 以降低延迟。'
+  if (msg.includes('http_401') || msg.includes('http_403')) return '建议：检查 API Key、模型权限以及环境变量是否生效并重启后端。'
+  if (msg.includes('http_404')) return '建议：检查 API URL/base_url 路径，确认是否指向正确的模型接口。'
+  if (msg.includes('http_429')) return '建议：触发限流，降低并发或重试频率，稍后重试。'
+  return `建议：查看失败节点日志并修复：${rawErr.slice(0, 120)}`
 })
 
 function applyExecutionHighlight() {
@@ -130,11 +146,21 @@ function applyExecutionHighlight() {
 
   nodes.value.forEach((n) => {
     const s = statusMap.get(String(n.id))
-    let cls = ''
+    let cls = 'magic-node'
     if (s === 'success') cls = 'exec-success'
     else if (s === 'running') cls = 'exec-running'
     else if (s === 'fail') cls = 'exec-fail'
-    ;(n as unknown as { class?: string }).class = cls
+    ;(n as unknown as { class?: string }).class = `magic-node ${cls}`
+  })
+
+  edges.value.forEach((e) => {
+    const sourceStatus = statusMap.get(String(e.source))
+    const targetStatus = statusMap.get(String(e.target))
+    let cls = ''
+    if (sourceStatus === 'success' && targetStatus === 'running') cls = 'exec-edge-active'
+    else if (sourceStatus === 'success' && targetStatus === 'success') cls = 'exec-edge-done'
+    else if (sourceStatus === 'fail' || targetStatus === 'fail') cls = 'exec-edge-fail'
+    ;(e as unknown as { class?: string }).class = cls
   })
 }
 
@@ -513,8 +539,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex flex-col h-screen bg-[#0b0f14]">
-    <header class="flex items-center justify-between px-5 py-2.5 border-b border-white/5 bg-[#0b0f14]/80 backdrop-blur-sm shrink-0">
+  <div class="workflow-root flex flex-col h-screen">
+    <header class="flex items-center justify-between px-5 py-2.5 border-b border-white/10 bg-[#0f1430]/70 backdrop-blur-md shrink-0">
       <div class="flex items-center gap-2">
         <button
           type="button"
@@ -578,7 +604,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
-      <aside class="w-52 border-r border-white/5 bg-[#0b0f14] overflow-y-auto shrink-0">
+      <aside class="w-52 border-r border-white/10 bg-white/[0.04] backdrop-blur-md overflow-y-auto shrink-0">
         <div class="py-3 px-3 text-[11px] font-medium uppercase tracking-wider text-gray-500">节点</div>
         <div v-for="[category, items] in paletteByCategory" :key="category" class="px-3 pb-4">
           <div class="text-[11px] font-medium text-gray-500 mb-1.5 px-0.5">{{ category }}</div>
@@ -599,7 +625,7 @@ onBeforeUnmount(() => {
 
       <div
         ref="flowWrapperRef"
-        class="flex-1 relative bg-[#0b0f14]"
+        class="flex-1 relative workflow-canvas"
         @drop="onDrop"
         @dragover="onDragOver"
       >
@@ -619,10 +645,31 @@ onBeforeUnmount(() => {
           <FlowBackground v-if="showGrid" pattern-color="rgba(255,255,255,0.035)" :gap="gridGap" />
           <FlowControls class="workflow-controls" />
         </VueFlow>
+
+        <!-- 全息虚拟助手 -->
+        <div class="absolute right-5 bottom-5 z-20">
+          <button
+            type="button"
+            class="assistant-orb"
+            @click="assistantOpen = !assistantOpen"
+            title="虚拟助手"
+          >
+            <span class="assistant-avatar">AI</span>
+          </button>
+          <div v-if="assistantOpen" class="assistant-panel mt-2">
+            <div class="text-xs font-medium text-white mb-1.5">全息助手</div>
+            <div class="text-[11px] text-[#c8d2ff] leading-5">
+              <div>当前状态：{{ executionDetail?.status || (stepLoading ? 'running' : 'idle') }}</div>
+              <div>已完成节点：{{ executionProgress?.finishedNodes ?? 0 }}</div>
+              <div v-if="executionProgress?.last">当前节点：{{ executionProgress.last.node_id }}</div>
+              <div class="mt-1 text-[#9db0ff]">建议：{{ assistantSuggestion }}</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <aside
-        class="w-[340px] border-l border-white/5 bg-[#0b0f14] overflow-y-auto shrink-0"
+        class="w-[340px] border-l border-white/10 bg-white/[0.04] backdrop-blur-md overflow-y-auto shrink-0"
       >
         <div class="py-3 px-4 border-b border-white/5">
           <div class="flex items-center gap-2">
@@ -885,17 +932,81 @@ onBeforeUnmount(() => {
         </div>
       </aside>
     </div>
+    <!-- 底部执行台 -->
+    <section class="border-t border-white/10 bg-[#0f1430]/70 backdrop-blur-md shrink-0">
+      <div class="flex items-center justify-between px-4 py-2">
+        <div class="text-xs text-[#dce3ff]">执行控制台</div>
+        <button
+          type="button"
+          class="text-[11px] px-2 py-1 rounded bg-white/10 text-[#dce3ff] hover:bg-white/15"
+          @click="consoleCollapsed = !consoleCollapsed"
+        >
+          {{ consoleCollapsed ? '展开' : '收起' }}
+        </button>
+      </div>
+      <div v-if="!consoleCollapsed" class="px-4 pb-4">
+        <div class="grid grid-cols-3 gap-3 text-[11px]">
+          <div class="rounded border border-white/10 bg-white/[0.03] p-2">
+            <div class="text-[#97a7df]">execution_id</div>
+            <div class="text-[#e8edff] mt-1">{{ runResult?.executionId || '-' }}</div>
+          </div>
+          <div class="rounded border border-white/10 bg-white/[0.03] p-2">
+            <div class="text-[#97a7df]">status</div>
+            <div class="text-[#e8edff] mt-1">{{ executionDetail?.status || (stepLoading ? 'running' : 'idle') }}</div>
+          </div>
+          <div class="rounded border border-white/10 bg-white/[0.03] p-2">
+            <div class="text-[#97a7df]">已完成节点</div>
+            <div class="text-[#e8edff] mt-1">{{ executionProgress?.finishedNodes ?? 0 }}</div>
+          </div>
+        </div>
+        <div class="mt-3 rounded border border-white/10 bg-white/[0.03] p-2">
+          <div class="text-[#97a7df] text-[11px] mb-1">实时输出（JSON）</div>
+          <pre class="text-[11px] text-[#e8edff] max-h-36 overflow-auto font-mono">{{ JSON.stringify(executionDetail?.nodes || [], null, 2) }}</pre>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
 <style>
+.workflow-root {
+  background:
+    radial-gradient(1200px 500px at 20% 10%, rgba(168, 85, 247, 0.22), transparent 60%),
+    radial-gradient(1000px 400px at 80% 20%, rgba(59, 130, 246, 0.22), transparent 60%),
+    radial-gradient(900px 360px at 50% 85%, rgba(236, 72, 153, 0.18), transparent 60%),
+    #090d1f;
+}
+.workflow-canvas {
+  background:
+    radial-gradient(900px 380px at 30% 15%, rgba(168,85,247,0.08), transparent 60%),
+    radial-gradient(800px 340px at 75% 25%, rgba(59,130,246,0.08), transparent 60%),
+    #0b1026;
+}
 .vue-flow-workflow {
   --vf-node-bg: transparent;
   --vf-node-border: transparent;
   --vf-node-text: currentColor;
 }
 .vue-flow-minimal .vue-flow__edge-path {
-  stroke: rgba(255,255,255,0.15);
+  stroke: rgba(116, 155, 255, 0.5);
+  stroke-width: 2;
+  stroke-dasharray: 8 8;
+  animation: edgeFlow 1.2s linear infinite;
+}
+.vue-flow__edge.exec-edge-active .vue-flow__edge-path {
+  stroke: rgba(245, 158, 11, 0.95);
+  stroke-width: 2.6;
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, .65));
+}
+.vue-flow__edge.exec-edge-done .vue-flow__edge-path {
+  stroke: rgba(34, 197, 94, 0.85);
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 4px rgba(34, 197, 94, .5));
+}
+.vue-flow__edge.exec-edge-fail .vue-flow__edge-path {
+  stroke: rgba(239, 68, 68, 0.9);
+  stroke-width: 2.4;
+  filter: drop-shadow(0 0 4px rgba(239, 68, 68, .45));
 }
 .vue-flow-minimal .vue-flow__controls-button {
   background: transparent;
@@ -913,6 +1024,47 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   overflow: hidden;
   background: rgba(15, 20, 27, 0.9);
+}
+
+.vue-flow__node.magic-node {
+  position: relative;
+  box-shadow: 0 0 0 1px rgba(168, 85, 247, .25), 0 0 18px rgba(59, 130, 246, .15);
+}
+
+.vue-flow__node.magic-node::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 10px;
+  pointer-events: none;
+  background: linear-gradient(120deg, rgba(168,85,247,.35), rgba(59,130,246,.35), rgba(236,72,153,.35));
+  opacity: .28;
+  mix-blend-mode: screen;
+}
+.assistant-orb {
+  width: 46px;
+  height: 46px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: linear-gradient(135deg, rgba(168,85,247,.35), rgba(59,130,246,.35), rgba(236,72,153,.35));
+  box-shadow: 0 0 25px rgba(168,85,247,.35), 0 0 35px rgba(59,130,246,.25);
+}
+.assistant-avatar {
+  font-size: 12px;
+  color: #fff;
+  font-weight: 600;
+}
+.assistant-panel {
+  width: 220px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(14, 20, 44, 0.78);
+  backdrop-filter: blur(12px);
+  padding: 10px;
+  box-shadow: 0 0 24px rgba(95,146,255,.22);
+}
+@keyframes edgeFlow {
+  to { stroke-dashoffset: -16; }
 }
 
 .vue-flow__node.exec-success {
@@ -963,9 +1115,31 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
+.vue-flow__node.exec-running::before {
+  opacity: .45;
+}
+
+.vue-flow__node.exec-running::after {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(245, 158, 11, 0.95);
+  box-shadow: 0 0 10px rgba(245,158,11,.85), 14px -8px 0 rgba(245,158,11,.45), 22px 8px 0 rgba(245,158,11,.25);
+  animation: nodeParticleTrail 0.9s linear infinite;
+}
+
 @keyframes workflowPulse {
   0% { filter: brightness(1); }
   50% { filter: brightness(1.15); }
   100% { filter: brightness(1); }
+}
+
+@keyframes nodeParticleTrail {
+  0% { transform: translateX(0) translateY(-50%); opacity: .9; }
+  100% { transform: translateX(18px) translateY(-50%); opacity: .15; }
 }
 </style>

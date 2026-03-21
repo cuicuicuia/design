@@ -36,11 +36,8 @@ export const NODE_DEFINITIONS: NodeTypeDef[] = [
     ],
     outputs: [{ id: 'text', label: '回复', type: 'string' }],
     configFields: [
-      { key: 'mode', label: '模式', field: 'select', options: ['chat', 'executor_plan'] },
-      { key: 'model', label: '模型', field: 'select', options: ['qwen', 'gpt-4o'] },
       { key: 'system', label: '系统提示词', field: 'textarea' },
       { key: 'prompt', label: '默认提示', field: 'textarea' },
-      { key: 'executor_template', label: '执行器模板(可选)', field: 'textarea' },
       { key: 'timeout_ms', label: '超时(ms,默认60000)', field: 'text' },
       { key: 'max_tokens', label: '最大Token(默认1024)', field: 'text' },
       { key: 'retries', label: '重试次数(默认1)', field: 'text' },
